@@ -1,0 +1,249 @@
+---
+title: 'Research Assistant Code Challenge'
+author: "Baobao Zhang"
+date: "November 2018"
+---
+
+The code challenge is to test your availability to write R code. The tasks approximate the data analysis you will do as a research assistant. Your task is to produce a R Markdown notebook that includes your code and the output of your code. You may use any resource (e.g., friends, classmates, professors, Stack Overflow) -- except me -- to help you.
+
+Here are some existing code to help you out
+
+```{r setup, include=FALSE, cache=TRUE, warning=TRUE}
+# Clear all objects
+rm(list = ls(all = TRUE))
+# Set seed
+set.seed(7482)
+# Load packages
+library(labelled)
+library(lmtest)
+library(sandwich)
+library(magrittr)
+library(ggplot2)
+library(stringr)
+library(Hmisc)
+
+# Generate fake data set
+df <- data.frame(
+  # Respondent ID
+  respondent_id = 1:1000,
+  # Survey weights
+  weights = runif(n = 1000, min = 0.5, max = 1.5),
+  # Outcome
+  Y1 = sample(x = c(2, 1, -1, -2, -77, -99, -88), size = 1000, replace = TRUE, 
+              prob = c(0.2, 0.5, 0.4, 0.2, 0.05, 0.1, 0.1)),
+  Y2 = sample(x = c(1, 2, 3, -77, -99, -88), size = 1000, replace = TRUE, 
+              prob = c(0.2, 0.5, 0.4, 0.05, 0.05, 0.1))
+)
+df$Y1 <- labelled(x = df$Y1, labels = c("Strongly agree" = 2, 
+                        "Agree" = 1, 
+                        "Disagree" = -1, 
+                        "Strongly disagree" = -2, "Not shown" = -77, 
+                        "I don't know" = -99, "Missing" = -88))
+df$Y2 <- labelled(x = df$Y2, labels = c("High" = 3, "Medium" = 2, "Low" = 1, "Not shown" = -77, 
+                        "I don't know" = -99, "Missing" = -88))
+
+# Function to relabel variables
+relabel_var <- function(old_var, old_labels, new_labels) {
+  new_var <- rep(NA, length(old_var))
+  if (is.factor(old_var)) {
+    old_var <- as.character(old_var)
+  }
+  for (i in 1:length(old_labels)) {
+    new_var[old_var == old_labels[i]] <- new_labels[i]
+  }
+  return(new_var)
+}
+
+# Trailing zeros rounding function
+roundfunc <- function(x,
+                      round_digits = 2,
+                      lessthan = TRUE) {
+  if (lessthan) {
+    temp <- ifelse(x > 0 & round(x, round_digits) == 0,
+                   paste0("<0.", rep(0, (round_digits - 1)), 1),
+                   sprintf(paste0("%.", round_digits, "f"), round(x, round_digits)))
+    temp <- ifelse(x < 0 & round(x, round_digits) == 0,
+                   paste0(">-0.", rep(0, (round_digits - 1)), 1),
+                   temp)
+    temp[x == 0] <- 0
+    return(temp)
+  } else {
+    return(sprintf(paste0("%.", round_digits, "f"), round(x, round_digits)))
+  }
+}
+
+# Function to summarize categorical variables
+catvar_func <-
+  function(outcome, # outcome name
+           outcome_var, # numeric outcome variable
+           label_var, # labelled outcome variable 
+           num_missing, # numerical value for missing or skipped
+           num_DK, # numeric value for don't know
+           shown, # variable for whether the question was shown to respondents
+           output_type, # num_outcome = output clean data; value_table = frequency table; value_sum = mean/SE/N
+           new_values, # new numerical values
+           edit_labels = TRUE, # TRUE allows us to edit the value labels
+           survey_weights, # survey weights
+           missing_recode # the recode value for missing/skipped/don't know responses 
+           ) {
+    # Clean data to make the bar chart
+    # Get the value labels
+    value_labels <- as.data.frame(val_labels(label_var))
+    value_labels$labels <- row.names(value_labels)
+    names(value_labels)[1] <- "num"
+    row.names(value_labels) <- NULL
+    # Make data frame for the new values
+    new_values_table <- data.frame(labels = value_labels$labels, new_values = new_values)
+    # Make the frequency table
+    sum_func <- function(outcome_var, value, survey_weights) {
+      se_md <- lm(outcome_var[shown] == value ~ 1, 
+                  weights = survey_weights[shown])
+      out <- coeftest(se_md, vcov = vcovHC(se_md, type="HC2"))
+      return(data.frame(num = value, 
+        Freq = sum(outcome_var[shown] == value),
+                        Prop = as.numeric(out[1]), 
+                        se = as.numeric(out[2])))
+    }
+    value_table <- do.call(rbind, lapply(value_labels$num, sum_func,
+                          outcome_var = outcome_var,
+           survey_weights = survey_weights))
+    # Merge the frequency table with the value labels
+    value_table <-
+      merge(x = value_table, y = value_labels, all.y = TRUE)
+    value_table$group <-
+      ifelse(value_table$num %in% c(num_missing, num_DK),
+             "Don't know/Missing",
+             "Responses")
+    value_table$group <-
+      factor(value_table$group,
+             levels = c("Responses",
+                        "Don't know/Missing"))
+    value_table$labels <- capitalize(value_table$labels)
+    value_table$outcome <- outcome
+    value_table <- merge(x = value_table, y = new_values_table, all.x = TRUE)
+    if (edit_labels) {
+      value_table$labels <- ifelse(
+        value_table$group == "Responses",
+        paste0(value_table$new_values, ". ",
+               value_table$labels),
+        value_table$labels
+      )
+    }
+    # Remove the not asked
+    value_table <- value_table[!grepl(pattern = "not asked|not shown", 
+                                      value_table$labels, 
+                                      ignore.case = TRUE),]
+    # Get the summary statistics
+    num_outcome <- as.numeric(outcome_var[shown])
+    survey_weights <- survey_weights[shown]
+    num_outcome <-
+      relabel_var(
+        old_var = num_outcome,
+        old_labels = value_table$num,
+        new_labels = value_table$new_values
+      )
+    num_outcome_missing <- is.na(num_outcome)
+    num_outcome[is.na(num_outcome)] <- missing_recode
+    # Get the percent missing
+    percent_missing <-
+      sum(num_outcome_missing) / length(num_outcome_missing)
+    # Get the mean and se
+    md <- if (percent_missing > 0.1) {
+      # If more than 10 percent is missing, then we condition on normalized dummy variable for missingness
+      se_md <- lm(num_outcome ~ scale(num_outcome_missing),
+                 weights = survey_weights)
+      coeftest(se_md, vcov = vcovHC(se_md, type="HC2"))[1,]
+    } else {
+      se_md <- lm(num_outcome ~ 1,
+                 weights = survey_weights)
+      coeftest(se_md, vcov = vcovHC(se_md, type="HC2"))
+    }
+    # Put the summary statistics together
+    value_sum <-
+      data.frame(
+        outcome = outcome,
+        num = md[1],
+        se = md[2],
+        group = "Responses",
+        sum_stat = paste0("Mean: ", roundfunc(md[1]), 
+                          " (MOE: +/-", roundfunc(qnorm(0.975)*md[2]),
+                          "); N = ",
+                          sum(shown)),
+        N = sum(shown)
+      )
+    if (output_type == "num_outcome") {
+      return(num_outcome)
+    } else if (output_type == "value_table") {
+      return(value_table)
+    } else {
+      return(value_sum)
+    }
+  }
+
+
+# Output for Y1
+Y1_func <- function(output_type, dk_plot = NULL, skipped_plot = NULL) {
+  out <- catvar_func(
+  outcome = "Y1",
+  outcome_var = as.numeric(df$Y1),
+  label_var = df$Y1,
+  output_type = output_type,
+  shown = df$Y1 != -77,
+  num_missing = -88,
+  num_DK = -99,
+  new_values <- c(2, 1, -1, -2, NA, NA, NA),
+  survey_weights = df$weights, 
+  missing_recode = mean(df$Y1[!df$Y1 %in% c(-77, -99, -88)]) # mean impute the don't know and missings
+  )  
+  # For frequency tables, change the position of the "num" variable for plotting 
+  if (output_type == "value_table") {
+    out$num[grep(pattern = "don't know", x = out$labels, ignore.case = TRUE)] <- dk_plot
+    out$num[grep(pattern = "skipped|missing", x = out$labels, ignore.case = TRUE)] <- skipped_plot
+  }
+  return(out)
+}
+# Note that I changed the position of the don't know and skipped responses
+Y1_value_table <- Y1_func("value_table", dk_plot = 8, skipped_plot = 9) 
+Y1_value_sum <- Y1_func("value_sum")
+
+# Graph to display Y1
+ggplot() +
+  # Bar graph
+  geom_bar(data = Y1_value_table, aes(x = num, y = Prop), 
+           stat = "identity",
+           fill = "grey70") +
+  # Error bars
+  geom_errorbar(data = 
+                  Y1_value_table[Y1_value_table$Prop !=0,], 
+                aes(x = num, ymin = Prop + qnorm(0.025)*se,
+                    ymax = Prop + qnorm(0.975)*se), width = 0.1) +
+  # Add in the percentage texts
+  geom_text(data = Y1_value_table, aes(x = num, 
+                                           label = roundfunc(Prop*100, 0)), 
+            y = 0.02, nudge_x = 0.25) +
+  # Beautify the x-axis
+  scale_x_continuous(breaks = Y1_value_table$num[order(Y1_value_table$num)],
+    labels = str_wrap(Y1_value_table$labels[order(Y1_value_table$num)], 
+                      width = 15)) +
+  # Break up the responses by type
+  facet_grid(~group, scales = "free_x", space = "free_x") + theme_bw() +
+  # Add in the numerical summary statistics
+  geom_text(data = Y1_value_sum, aes(x = 0, label = sum_stat,
+                                       y = max(Y1_value_table$Prop)+0.05)) +
+  # Change the scale to percentage points
+  scale_y_continuous(labels = scales::percent, 
+                     limits = c(0, max(Y1_value_table$Prop)+0.05)) +
+  # Label the axis and add in the caption 
+  xlab("Responses") + ylab("Percentage of respondents") + 
+  labs(caption = "Source: Governance of AI Program")
+```
+
+Your tasks consists of the following:
+
+- Recode the `Y2` variable such that "High" = 2, "Medium" = 1, "Low" = 0.
+- Use the code above to generate a similar graph for the `Y2` variable.
+- Bonus challenge: write a general function to generate graphs for `Y1` and `Y2`.
+
+Make sure to comment throughout your code. 
+
+
